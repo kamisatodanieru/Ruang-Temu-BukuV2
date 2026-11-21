@@ -49,16 +49,37 @@ class FinePaymentService
             ]
         );
 
-        if ($fine->isPayable() && ($fine->overdue_days !== $overdueDays || $fine->total_amount !== $totalAmount)) {
-            $fine->overdue_days = $overdueDays;
+        if ($fine->status === FineStatus::PendingPayment) {
+            $this->syncPaymentStatusFromMidtrans($fine);
+            $fine->refresh();
+        }
+
+        $paidAmount = (int) $fine->payments()
+            ->where('status', PaymentStatus::Paid->value)
+            ->sum('gross_amount');
+        $paidDays = $finePerDay > 0 ? intdiv($paidAmount, $finePerDay) : 0;
+        $coveredDays = $paidDays > 0 ? $paidDays : ($fine->status === FineStatus::Paid ? (int) $fine->overdue_days : 0);
+        $coveredAmount = $paidAmount > 0 ? $paidAmount : ($fine->status === FineStatus::Paid ? (int) $fine->total_amount : 0);
+        $remainingDays = max(0, $overdueDays - $coveredDays);
+        $remainingAmount = max(0, $totalAmount - $coveredAmount);
+
+        if (
+            $fine->status !== FineStatus::Waived
+            && $remainingDays > 0
+            && ($fine->status === FineStatus::Paid || $fine->overdue_days !== $remainingDays || $fine->total_amount !== $remainingAmount)
+        ) {
+            $fine->overdue_days = $remainingDays;
             $fine->fine_per_day = $finePerDay;
-            $fine->total_amount = $totalAmount;
+            $fine->total_amount = $remainingAmount;
 
             if ($fine->status === FineStatus::PendingPayment) {
                 $fine->status = FineStatus::Unpaid;
                 $fine->payments()
                     ->where('status', PaymentStatus::Pending->value)
                     ->update(['status' => PaymentStatus::Cancelled->value]);
+            } elseif ($fine->status === FineStatus::Paid) {
+                $fine->status = FineStatus::Unpaid;
+                $fine->paid_at = null;
             }
 
             $fine->save();
@@ -126,12 +147,17 @@ class FinePaymentService
             if ($lockedFine->loan !== null && $lockedFine->loan->isOverdue()) {
                 $currentOverdueDays = $lockedFine->loan->overdueDays();
                 $finePerDay = (int) config('library.fine_per_day', 1000);
-                $currentTotal = $currentOverdueDays * $finePerDay;
+                $paidAmount = (int) $lockedFine->payments()
+                    ->where('status', PaymentStatus::Paid->value)
+                    ->sum('gross_amount');
+                $paidDays = $finePerDay > 0 ? intdiv($paidAmount, $finePerDay) : 0;
+                $remainingDays = max(0, $currentOverdueDays - $paidDays);
+                $remainingTotal = max(0, ($currentOverdueDays * $finePerDay) - $paidAmount);
 
-                if ($currentTotal > 0 && ($lockedFine->overdue_days !== $currentOverdueDays || $lockedFine->total_amount !== $currentTotal)) {
-                    $lockedFine->overdue_days = $currentOverdueDays;
+                if ($remainingTotal > 0 && ($lockedFine->overdue_days !== $remainingDays || $lockedFine->total_amount !== $remainingTotal)) {
+                    $lockedFine->overdue_days = $remainingDays;
                     $lockedFine->fine_per_day = $finePerDay;
-                    $lockedFine->total_amount = $currentTotal;
+                    $lockedFine->total_amount = $remainingTotal;
                     $lockedFine->save();
                 }
             }
@@ -252,20 +278,37 @@ class FinePaymentService
                 $payment->settled_at = $payment->settled_at ?? now();
                 $payment->save();
 
+                if ($wasAlreadyPaid) {
+                    return $payment;
+                }
+
                 if (
                     $fine !== null
                     && $fine->status !== FineStatus::Paid
                     && $fine->status !== FineStatus::Waived
-                    && (int) $payment->gross_amount >= (int) $fine->total_amount
                 ) {
-                    $fine->status = FineStatus::Paid;
-                    $fine->paid_at = $fine->paid_at ?? now();
-                    $fine->save();
+                    if ((int) $payment->gross_amount >= (int) $fine->total_amount) {
+                        $fine->status = FineStatus::Paid;
+                        $fine->paid_at = $fine->paid_at ?? now();
+                        $fine->save();
 
-                    if (! $wasAlreadyPaid) {
                         ActivityLogger::record(
                             action: 'fine.paid',
                             description: "Pembayaran denda #{$fine->id} lunas via Midtrans ({$paymentType}) dengan Order ID {$orderId}",
+                            subject: $fine,
+                            actor: $payment->user,
+                        );
+                    } elseif ((int) $payment->gross_amount > 0) {
+                        $finePerDay = max(1, (int) $fine->fine_per_day);
+                        $paidDays = intdiv((int) $payment->gross_amount, $finePerDay);
+                        $fine->overdue_days = max(1, (int) $fine->overdue_days - $paidDays);
+                        $fine->total_amount = max($finePerDay, (int) $fine->total_amount - (int) $payment->gross_amount);
+                        $fine->status = FineStatus::Unpaid;
+                        $fine->save();
+
+                        ActivityLogger::record(
+                            action: 'fine.paid',
+                            description: "Pembayaran denda sebagian #{$fine->id} diterima via Midtrans ({$paymentType}) dengan Order ID {$orderId}",
                             subject: $fine,
                             actor: $payment->user,
                         );

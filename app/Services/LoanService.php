@@ -42,10 +42,16 @@ class LoanService
                 ]);
             }
 
-            // 3. Periksa blokir overdue (status = borrowed, returned_at IS NULL, due_at < now())
+            // 3. Periksa blokir overdue (status = borrowed, returned_at IS NULL, due_at < now()) dan tagihan denda belum lunas
             if ($lockedMember->overdueLoans()->exists()) {
                 throw ValidationException::withMessages([
                     'loan' => 'Anda tidak dapat mengajukan peminjaman baru karena masih memiliki buku yang terlambat dikembalikan (overdue).',
+                ]);
+            }
+
+            if ($lockedMember->unpaidFines()->exists()) {
+                throw ValidationException::withMessages([
+                    'loan' => 'Anda tidak dapat mengajukan peminjaman baru karena masih memiliki tagihan denda keterlambatan yang belum dilunasi.',
                 ]);
             }
 
@@ -127,10 +133,16 @@ class LoanService
                 ]);
             }
 
-            // 4. Pastikan anggota tidak memiliki pinjaman overdue
+            // 4. Pastikan anggota tidak memiliki pinjaman overdue atau tagihan denda belum lunas
             if ($lockedMember->overdueLoans()->exists()) {
                 throw ValidationException::withMessages([
                     'loan' => 'Persetujuan ditolak karena anggota memiliki pinjaman buku lain yang sedang terlambat (overdue).',
+                ]);
+            }
+
+            if ($lockedMember->unpaidFines()->exists()) {
+                throw ValidationException::withMessages([
+                    'loan' => 'Persetujuan ditolak karena anggota masih memiliki tagihan denda keterlambatan yang belum dilunasi.',
                 ]);
             }
 
@@ -365,12 +377,19 @@ class LoanService
                             'status' => FineStatus::Unpaid,
                         ]);
                     } elseif (in_array($existingFine->status, [FineStatus::Unpaid, FineStatus::PendingPayment], true)) {
-                        $amountChanged = $existingFine->total_amount !== $totalAmount
-                            || $existingFine->overdue_days !== $overdueDays;
+                        $paidAmount = (int) $existingFine->payments()
+                            ->where('status', PaymentStatus::Paid->value)
+                            ->sum('gross_amount');
+                        $paidDays = $finePerDay > 0 ? intdiv($paidAmount, $finePerDay) : 0;
+                        $remainingDays = max(1, $overdueDays - $paidDays);
+                        $remainingAmount = max($finePerDay, $totalAmount - $paidAmount);
 
-                        $existingFine->overdue_days = $overdueDays;
+                        $amountChanged = $existingFine->total_amount !== $remainingAmount
+                            || $existingFine->overdue_days !== $remainingDays;
+
+                        $existingFine->overdue_days = $remainingDays;
                         $existingFine->fine_per_day = $finePerDay;
-                        $existingFine->total_amount = $totalAmount;
+                        $existingFine->total_amount = $remainingAmount;
 
                         if ($amountChanged && $existingFine->status === FineStatus::PendingPayment) {
                             $existingFine->status = FineStatus::Unpaid;
@@ -380,16 +399,24 @@ class LoanService
                         }
 
                         $existingFine->save();
-                    } elseif ($existingFine->status === FineStatus::Paid && $overdueDays > $existingFine->overdue_days) {
-                        // Jika anggota sempat membayar lebih awal namun masih menahan buku hingga hari berikutnya,
-                        // tagihkan selisih hari keterlambatan yang belum dibayar.
-                        $additionalDays = $overdueDays - $existingFine->overdue_days;
-                        $existingFine->overdue_days = $additionalDays;
-                        $existingFine->fine_per_day = $finePerDay;
-                        $existingFine->total_amount = $additionalDays * $finePerDay;
-                        $existingFine->status = FineStatus::Unpaid;
-                        $existingFine->paid_at = null;
-                        $existingFine->save();
+                    } elseif ($existingFine->status === FineStatus::Paid) {
+                        $paidAmount = (int) $existingFine->payments()
+                            ->where('status', PaymentStatus::Paid->value)
+                            ->sum('gross_amount');
+                        $paidDays = $finePerDay > 0 ? intdiv($paidAmount, $finePerDay) : 0;
+                        $coveredDays = max($existingFine->overdue_days, $paidDays);
+
+                        if ($overdueDays > $coveredDays) {
+                            // Jika anggota sempat membayar lebih awal namun masih menahan buku hingga hari berikutnya,
+                            // tagihkan selisih hari keterlambatan yang belum dibayar.
+                            $additionalDays = $overdueDays - $coveredDays;
+                            $existingFine->overdue_days = $additionalDays;
+                            $existingFine->fine_per_day = $finePerDay;
+                            $existingFine->total_amount = $additionalDays * $finePerDay;
+                            $existingFine->status = FineStatus::Unpaid;
+                            $existingFine->paid_at = null;
+                            $existingFine->save();
+                        }
                     }
                 }
             }

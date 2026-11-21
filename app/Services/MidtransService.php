@@ -30,6 +30,7 @@ class MidtransService
      * Get Midtrans Snap Token for transaction.
      *
      * @param  array<string, mixed>  $params
+     *
      * @throws Exception
      */
     public function createSnapToken(array $params): string
@@ -41,7 +42,7 @@ class MidtransService
      * Create Snap Transaction and get redirect URL / token.
      *
      * @param  array<string, mixed>  $params
-     * @return object
+     *
      * @throws Exception
      */
     public function createTransaction(array $params): object
@@ -56,7 +57,7 @@ class MidtransService
      */
     public function handleNotification(): Notification
     {
-        return new Notification();
+        return new Notification;
     }
 
     /**
@@ -100,7 +101,7 @@ class MidtransService
             return false;
         }
 
-        $expectedSignature = hash('sha512', $orderId . $statusCode . $grossAmount . $serverKey);
+        $expectedSignature = hash('sha512', $orderId.$statusCode.$grossAmount.$serverKey);
 
         return hash_equals($expectedSignature, $signatureKey);
     }

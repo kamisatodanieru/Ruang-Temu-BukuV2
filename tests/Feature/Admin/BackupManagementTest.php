@@ -137,8 +137,11 @@ class BackupManagementTest extends TestCase
 
         $zip = new ZipArchive;
         $zip->open($tempZip);
+        $manifestStat = $zip->statName('manifest.json');
         $stat = $zip->statName('database.sql');
+        $this->assertSame(ZipArchive::EM_AES_256, $manifestStat['encryption_method'] ?? null);
         $this->assertSame(ZipArchive::EM_AES_256, $stat['encryption_method'] ?? null);
+        $this->assertFalse(@$zip->getFromName('manifest.json'));
         $this->assertFalse(@$zip->getFromName('database.sql'));
         $zip->close();
         @unlink($tempZip);

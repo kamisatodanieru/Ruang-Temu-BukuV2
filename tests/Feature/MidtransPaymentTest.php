@@ -247,4 +247,142 @@ class MidtransPaymentTest extends TestCase
         $this->assertSame(5000, $fine->total_amount);
         $this->assertSame(FineStatus::Unpaid, $fine->status);
     }
+
+    public function test_replayed_webhook_from_prior_payment_does_not_settle_new_residual_fine_after_return(): void
+    {
+        $petugas = User::factory()->petugas()->create();
+        $member = User::factory()->anggota()->create();
+        $book = Book::factory()->create(['total_stock' => 2, 'available_stock' => 1]);
+
+        $overdueLoan = Loan::factory()->borrowed()->create([
+            'member_id' => $member->id,
+            'book_id' => $book->id,
+            'borrowed_at' => now()->subDays(10),
+            'due_at' => now()->subDays(3)->addHour(),
+        ]);
+
+        // Hari ke-3 overdue: anggota melihat detail & membayar denda Rp 3.000 sebelum mengembalikan buku
+        $this->actingAs($member)->get(route('member.loans.show', $overdueLoan))->assertOk();
+        $fine = Fine::query()->where('loan_id', $overdueLoan->id)->firstOrFail();
+
+        $this->partialMock(MidtransService::class, function (MockInterface $mock) {
+            $mock->shouldReceive('createSnapToken')
+                ->once()
+                ->andReturn('dummy-snap-token-initial');
+        });
+
+        $payRes = $this->actingAs($member)->postJson(route('member.fines.pay', $fine));
+        $firstOrderId = (string) $payRes->json('order_id');
+        $serverKey = 'SB-Mid-server-test-key-12345';
+        $firstSig = hash('sha512', $firstOrderId.'200'.'3000.00'.$serverKey);
+
+        $firstWebhookPayload = [
+            'order_id' => $firstOrderId,
+            'status_code' => '200',
+            'gross_amount' => '3000.00',
+            'signature_key' => $firstSig,
+            'transaction_status' => 'settlement',
+            'fraud_status' => 'accept',
+            'payment_type' => 'qris',
+            'transaction_id' => 'MID-TRX-FIRST',
+        ];
+
+        $this->postJson(route('midtrans.notification'), $firstWebhookPayload)->assertOk();
+        $this->assertSame(FineStatus::Paid, $fine->fresh()->status);
+
+        // Anggota baru mengembalikan buku 2 hari kemudian (total 5 hari overdue -> sisa 2 hari = Rp 2.000)
+        $this->travel(2)->days();
+        $this->actingAs($petugas)->patch(route('staff.loans.return', $overdueLoan))->assertSessionHasNoErrors();
+
+        $fine->refresh();
+        $this->assertSame(FineStatus::Unpaid, $fine->status);
+        $this->assertSame(2, $fine->overdue_days);
+        $this->assertSame(2000, $fine->total_amount);
+
+        // Replay / pengiriman ulang webhook pertama (Rp 3.000) TIDAK boleh melunasi denda selisih baru (Rp 2.000)
+        $this->postJson(route('midtrans.notification'), $firstWebhookPayload)->assertOk();
+
+        $fine->refresh();
+        $this->assertSame(FineStatus::Unpaid, $fine->status);
+        $this->assertSame(2000, $fine->total_amount);
+    }
+
+    public function test_loan_show_syncs_pending_midtrans_payment_before_day_rollover_recalculation(): void
+    {
+        $member = User::factory()->anggota()->create();
+        $book = Book::factory()->create(['total_stock' => 2, 'available_stock' => 1]);
+
+        $overdueLoan = Loan::factory()->borrowed()->create([
+            'member_id' => $member->id,
+            'book_id' => $book->id,
+            'borrowed_at' => now()->subDays(8),
+            'due_at' => now()->subDay()->addHour(),
+        ]);
+
+        $this->actingAs($member)->get(route('member.loans.show', $overdueLoan))->assertOk();
+        $fine = Fine::query()->where('loan_id', $overdueLoan->id)->firstOrFail();
+
+        $payment = Payment::query()->create([
+            'order_id' => 'FINE-ROLLOVER-1001',
+            'fine_id' => $fine->id,
+            'user_id' => $member->id,
+            'gross_amount' => 1000,
+            'snap_token' => 'snap-rollover-token',
+            'status' => PaymentStatus::Pending,
+        ]);
+        $fine->status = FineStatus::PendingPayment;
+        $fine->save();
+
+        // Waktu melewati batas pergantian hari ke-2 (Rp 2.000), sementara pembayaran Rp 1.000 sudah settlement di Midtrans
+        $this->travel(1)->days();
+
+        $this->partialMock(MidtransService::class, function (MockInterface $mock) {
+            $mock->shouldReceive('getTransactionStatus')
+                ->once()
+                ->with('FINE-ROLLOVER-1001')
+                ->andReturn((object) [
+                    'order_id' => 'FINE-ROLLOVER-1001',
+                    'transaction_status' => 'settlement',
+                    'fraud_status' => 'accept',
+                    'gross_amount' => '1000.00',
+                    'payment_type' => 'qris',
+                    'transaction_id' => 'MID-ROLLOVER-1',
+                ]);
+        });
+
+        $this->actingAs($member)->get(route('member.loans.show', $overdueLoan))->assertOk();
+
+        $payment->refresh();
+        $fine->refresh();
+
+        $this->assertSame(PaymentStatus::Paid, $payment->status);
+        // Karena 1 hari (Rp 1.000) sudah dibayar dari total 2 hari (Rp 2.000), sisa tagihan hanya 1 hari (Rp 1.000)
+        $this->assertSame(1, $fine->overdue_days);
+        $this->assertSame(1000, $fine->total_amount);
+        $this->assertSame(FineStatus::Unpaid, $fine->status);
+    }
+
+    public function test_member_with_unpaid_fine_on_returned_loan_cannot_borrow_new_book(): void
+    {
+        $member = User::factory()->anggota()->create();
+        $returnedLoan = Loan::factory()->returned()->create(['member_id' => $member->id]);
+
+        Fine::query()->create([
+            'loan_id' => $returnedLoan->id,
+            'member_id' => $member->id,
+            'overdue_days' => 2,
+            'fine_per_day' => 1000,
+            'total_amount' => 2000,
+            'status' => FineStatus::Unpaid,
+        ]);
+
+        $newBook = Book::factory()->create(['total_stock' => 3, 'available_stock' => 3]);
+
+        $res = $this->actingAs($member)->post(route('member.loans.store'), [
+            'book_id' => $newBook->id,
+        ]);
+
+        $res->assertSessionHasErrors('loan');
+        $this->assertSame(0, $member->activeLoans()->count());
+    }
 }

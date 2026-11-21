@@ -132,6 +132,9 @@ class BackupService
 
             $manifestJson = (string) json_encode($manifestPayload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
             $zip->addFromString('manifest.json', $manifestJson);
+            if ($isEncrypted) {
+                $zip->setEncryptionName('manifest.json', ZipArchive::EM_AES_256);
+            }
 
             $zip->addFromString('database.sql', $sqlContent);
             if ($isEncrypted) {
@@ -237,7 +240,29 @@ class BackupService
                 ];
             }
 
-            $manifestRaw = $zip->getFromName('manifest.json');
+            $manifestStat = $zip->statName('manifest.json');
+            $manifestEncrypted = is_array($manifestStat)
+                && (($manifestStat['encryption_method'] ?? 0) === ZipArchive::EM_AES_256);
+
+            if ($manifestEncrypted) {
+                $isEncrypted = true;
+                $password = $this->archivePassword();
+                if ($password === '') {
+                    $zip->close();
+
+                    return [
+                        'valid' => false,
+                        'filename' => $filename,
+                        'checked_files' => 0,
+                        'encrypted' => true,
+                        'errors' => ['Kata sandi enkripsi arsip belum diatur.'],
+                        'manifest' => null,
+                    ];
+                }
+                $zip->setPassword($password);
+            }
+
+            $manifestRaw = @$zip->getFromName('manifest.json');
             if ($manifestRaw === false) {
                 $zip->close();
 
@@ -245,8 +270,8 @@ class BackupService
                     'valid' => false,
                     'filename' => $filename,
                     'checked_files' => 0,
-                    'encrypted' => false,
-                    'errors' => ['Data informasi arsip tidak ditemukan.'],
+                    'encrypted' => $manifestEncrypted,
+                    'errors' => [$manifestEncrypted ? 'Kata sandi enkripsi arsip tidak cocok atau manifest rusak.' : 'Data informasi arsip tidak ditemukan.'],
                     'manifest' => null,
                 ];
             }
@@ -677,7 +702,12 @@ class BackupService
                 return null;
             }
 
-            $manifestRaw = $zip->getFromName('manifest.json');
+            $password = $this->archivePassword();
+            if ($password !== '') {
+                $zip->setPassword($password);
+            }
+
+            $manifestRaw = @$zip->getFromName('manifest.json');
             $zip->close();
 
             if ($manifestRaw === false) {
@@ -701,7 +731,16 @@ class BackupService
 
     private function createTempFilePath(string $prefix): string
     {
-        $tempFile = tempnam(sys_get_temp_dir(), $prefix);
+        $privateTempDir = storage_path('app/private/temp');
+        if (! is_dir($privateTempDir)) {
+            @mkdir($privateTempDir, 0700, true);
+        }
+
+        $targetDir = is_dir($privateTempDir) && is_writable($privateTempDir)
+            ? $privateTempDir
+            : sys_get_temp_dir();
+
+        $tempFile = tempnam($targetDir, $prefix);
         if ($tempFile === false) {
             throw new RuntimeException('Tidak dapat membuat file sementara di direktori sistem.');
         }

@@ -67,6 +67,13 @@ class LoanController extends Controller
     {
         Gate::authorize('view', $loan);
 
+        $loan->loadMissing('fine.latestPayment');
+
+        if ($loan->fine) {
+            $finePaymentService->syncPaymentStatusFromMidtrans($loan->fine);
+            $loan->unsetRelation('fine');
+        }
+
         $finePaymentService->ensureFineForLoan($loan);
 
         $loan->load([
@@ -77,11 +84,6 @@ class LoanController extends Controller
             'returnConfirmer:id,name',
             'fine.latestPayment',
         ]);
-
-        if ($loan->fine) {
-            $finePaymentService->syncPaymentStatusFromMidtrans($loan->fine);
-            $loan->load('fine.latestPayment');
-        }
 
         return view('member.loans.show', [
             'loan' => $loan,
