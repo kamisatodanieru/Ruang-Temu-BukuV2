@@ -17,5 +17,5 @@ Options -Indexes
 
     # Arahkan seluruh request secara internal ke direktori public/
     RewriteCond %{REQUEST_URI} !^/Ruang_Temu_Buku_v2/public/ [NC]
-    RewriteRule !^public/ public/$0 [L,QSA,NC]
+    RewriteRule ^(?!public/)(.*)$ public/$1 [L,QSA,NC]
 </IfModule>
