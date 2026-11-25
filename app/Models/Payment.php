@@ -8,17 +8,28 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class Payment extends Model
 {
+    /**
+     * Nilai bawaan status pembayaran saat inisiasi awal.
+     *
+     * @var array<string, mixed>
+     */
+    protected $attributes = [
+        'status' => 'pending',
+    ];
+
+    /**
+     * Atribut yang diizinkan untuk mass assignment saat pembuatan order awal.
+     * status, settled_at, transaction_id, payment_type, dan payment_details dikecualikan
+     * agar hanya diperbarui secara otoritatif oleh verifikasi webhook Midtrans.
+     *
+     * @var list<string>
+     */
     protected $fillable = [
         'order_id',
         'fine_id',
         'user_id',
         'gross_amount',
         'snap_token',
-        'payment_type',
-        'transaction_id',
-        'status',
-        'payment_details',
-        'settled_at',
     ];
 
     protected function casts(): array
@@ -48,6 +59,6 @@ class Payment extends Model
 
     public function formattedAmount(): string
     {
-        return 'Rp '.number_format($this->gross_amount, 0, ',', '.');
+        return 'Rp '.number_format((int) $this->gross_amount, 0, ',', '.');
     }
 }

@@ -29,6 +29,7 @@
                     <label for="status" class="sr-only">Pilih Status</label>
                     <select id="status" name="status" class="block w-full rounded-xl border border-slate-300 px-3.5 py-2 text-sm bg-white">
                         <option value="">Semua Status</option>
+                        <option value="returns" @selected($filters['status'] === 'returns')>Antrean Pengembalian</option>
                         @foreach ($statuses as $statusOption)
                             <option value="{{ $statusOption->value }}" @selected($filters['status'] === $statusOption->value)>
                                 {{ $statusOption->label() }}
@@ -99,6 +100,18 @@
                                         <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-800">
                                             {{ $loan->status->label() }}
                                         </span>
+                                    @endif
+
+                                    @if ($loan->fine || $loan->isOverdue())
+                                        @php
+                                            $remainingFine = $loan->effectiveRemainingFine();
+                                            $totalFine = $loan->effectiveFineTotal();
+                                            $isFineSettled = $remainingFine === 0 && $loan->fine?->isPaid();
+                                        @endphp
+                                        <div class="mt-1 font-mono text-xs font-semibold {{ $isFineSettled ? 'text-emerald-600' : 'text-rose-600' }}">
+                                            Denda: Rp {{ number_format($isFineSettled ? $totalFine : $remainingFine, 0, ',', '.') }}
+                                            &bull; {{ $isFineSettled ? $loan->fine->status->label() : ($loan->fine?->status->label() ?? 'Estimasi') }}
+                                        </div>
                                     @endif
                                 </td>
                                 <td class="px-5 py-4 text-right whitespace-nowrap space-x-1.5">

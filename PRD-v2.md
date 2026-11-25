@@ -21,7 +21,7 @@ Ruang Temu Buku adalah aplikasi perpustakaan berbasis web untuk mengelola katalo
 
 Sistem memiliki tiga role: Admin, Petugas, dan Anggota. Guest dapat melihat katalog, tetapi harus login sebagai Anggota untuk meminjam.
 
-MVP berfokus pada perpustakaan fisik. Upload e-book, PDF/EPUB reader, reading progress, denda uang, OTP, verifikasi email, dan payment gateway ditunda ke tahap berikutnya.
+MVP berfokus pada perpustakaan fisik disertai pengajuan pengembalian (`return_pending`), perhitungan denda keterlambatan kumulatif (`fines`), dan pembayaran denda online melalui Midtrans Snap (`payments`). Upload e-book, PDF/EPUB reader, reading progress, OTP, verifikasi email, serta fitur pelunasan tunai loket/pembebasan denda (`waived`) oleh staf ditunda ke tahap berikutnya.
 
 ## 2. Tujuan Produk
 
@@ -106,7 +106,7 @@ Katalog publik memiliki pencarian judul/pengarang, filter kategori/ketersediaan,
 ### 4.3 Aturan peminjaman
 - Satu request hanya untuk satu buku.
 - Maksimal tiga transaksi aktif per anggota.
-- Transaksi aktif adalah `pending` + `borrowed`.
+- Transaksi aktif adalah `pending` + `borrowed` + `return_pending`.
 - Anggota tidak boleh memiliki transaksi aktif untuk judul/buku yang sama.
 - Anggota yang memiliki pinjaman overdue tidak boleh membuat request baru.
 - Saat mengajukan request, buku wajib tidak soft-deleted dan memiliki `available_stock > 0`.
@@ -144,22 +144,24 @@ Semua perubahan harus atomik dalam database transaction. Jika satu pemeriksaan g
 - Perubahan status mencatat aktor dan waktu.
 
 ### 4.6 Pengembalian
-- Hanya Petugas/Admin berwenang yang dapat mengonfirmasi pengembalian.
-- Hanya transaksi `borrowed` yang dapat dikembalikan.
+- Anggota dapat mengajukan pengembalian buku (`borrowed` → `return_pending`) dan menyerahkan fisik buku ke meja layanan.
+- Hanya Petugas/Admin berwenang yang dapat mengonfirmasi pengembalian (baik dari status `return_pending` maupun langsung dari `borrowed`).
 - Sistem mengisi `returned_at` dan `returned_confirmed_by`.
 - Status menjadi `returned`.
 - Stok bertambah satu tepat satu kali.
-- Proses memakai database transaction dan locking.
+- Proses memakai database transaction dan locking, didahului sinkronisasi pembayaran Midtrans yang masih `pending` di luar lock DB.
 - Request pengembalian berulang tidak boleh menambah stok berulang kali.
 - Anggota tidak harus login/aktif agar Petugas dapat memproses pengembalian.
 
-### 4.7 Overdue
-Overdue bukan status yang disimpan atau diubah manual. Transaksi dianggap overdue jika:
-- `status = borrowed`;
+### 4.7 Overdue & Denda Keterlambatan (Midtrans Snap)
+Overdue bukan status yang disimpan di kolom `loans.status`. Transaksi dianggap overdue jika:
+- `status IN (borrowed, return_pending)`;
 - `returned_at IS NULL`; dan
 - `due_at < waktu sekarang`.
 
-Sistem menghitung jumlah hari keterlambatan. Anggota dengan pinjaman overdue tidak dapat mengajukan request baru, tetapi tetap dapat melihat transaksi dan mengembalikan buku melalui Petugas. MVP tidak menghitung nominal denda atau pembayaran uang.
+Sistem menghitung hari keterlambatan (`ceil(selisih_jam / 24)`) dikalikan tarif `config('library.fine_per_day')` (default Rp 1.000/hari). Anggota yang memiliki pinjaman overdue atau denda belum lunas (`unpaid` / `pending_payment`) tidak dapat mengajukan atau disetujui untuk peminjaman baru.
+
+Tagihan denda (`fines`) menyimpan `overdue_days` dan `total_amount` secara **kumulatif**, serta `paid_amount` untuk melacak pembayaran bertahap sehingga histori total denda tetap akurat. Pembayaran diproses melalui Midtrans Snap (panggilan HTTP berada di luar `DB::transaction()` dengan urutan lock kanonik `Fine -> Payment`, pembatalan order usang ke API Midtrans, serta verifikasi signature `SHA-512` pada webhook). Fitur pelunasan tunai di loket dan pembebasan denda (`waived`) oleh staf disimpan untuk tahap pengembangan berikutnya.
 
 ### 4.8 Dashboard
 **Admin:** jumlah buku, total/stok tersedia, anggota aktif, request Pending, transaksi Borrowed, transaksi Overdue, aktivitas terbaru.
@@ -266,6 +268,7 @@ Pengembalian hanya dapat mengubah `borrowed` menjadi `returned` satu kali.
 Status yang disimpan:
 - `pending`
 - `borrowed`
+- `return_pending`
 - `returned`
 - `rejected`
 - `cancelled`
@@ -278,7 +281,8 @@ Status yang disimpan:
 | pending | Approve/serah buku | borrowed | Petugas/Admin |
 | pending | Reject | rejected | Petugas/Admin |
 | pending | Cancel | cancelled | Anggota pemilik |
-| borrowed | Konfirmasi kembali | returned | Petugas/Admin |
+| borrowed | Ajukan kembali | return_pending | Anggota pemilik |
+| borrowed / return_pending | Konfirmasi kembali | returned | Petugas/Admin |
 
 Transisi lain harus ditolak. Status akhir tidak boleh diterima bebas dari input browser.
 
@@ -548,8 +552,7 @@ Test otomatis bukan bukti bahwa sistem bebas kerentanan.
 - Peminjaman digital.
 - OTP dan verifikasi email.
 - Notifikasi email/SMS/WhatsApp.
-- Denda uang dan pembayaran online.
-- Payment gateway.
+- Pelunasan denda tunai di loket dan pembebasan denda (`waived`) oleh Petugas/Admin.
 - Multi-cabang.
 - Manajemen rak kompleks.
 - Aplikasi mobile native.
@@ -568,8 +571,9 @@ Test otomatis bukan bukti bahwa sistem bebas kerentanan.
 | Katalog Guest | Publik |
 | Pending mengurangi stok | Tidak |
 | Overdue | Dihitung otomatis |
-| Blokir request karena overdue | Ya |
-| Denda uang | Tidak termasuk MVP |
+| Blokir request karena overdue / denda belum lunas | Ya |
+| Denda keterlambatan & pembayaran | Kumulatif (`total_amount` & `paid_amount`) via Midtrans Snap |
+| Pelunasan tunai / waive staf | Tahap berikutnya |
 | Kategori delete | Restrict jika masih direferensikan |
 | Buku delete | Soft delete; blokir jika Pending/Borrowed |
 | Laporan | Filter, print view, CSV |

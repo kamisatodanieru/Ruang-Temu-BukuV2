@@ -72,23 +72,41 @@
                 </div>
             @endif
 
-            @if ($loan->fine)
-                <div class="rounded-2xl border {{ $loan->fine->isPaid() ? 'bg-emerald-50 border-emerald-200' : 'bg-rose-50 border-rose-200' }} p-5 space-y-2">
+            @if ($loan->fine || $loan->isOverdue())
+                @php
+                    $effectiveDays = $loan->effectiveOverdueDays();
+                    $fineRate = (int) ($loan->fine?->fine_per_day ?: config('library.fine_per_day', 1000));
+                    $effectiveTotal = $loan->effectiveFineTotal();
+                    $effectiveRemaining = $loan->effectiveRemainingFine();
+                    $paidSoFar = (int) ($loan->fine?->paid_amount ?? 0);
+                    $isFineSettled = $effectiveRemaining === 0 && $loan->fine?->isPaid();
+                @endphp
+                <div class="rounded-2xl border {{ $isFineSettled ? 'bg-emerald-50 border-emerald-200' : 'bg-rose-50 border-rose-200' }} p-5 space-y-2">
                     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                         <div>
-                            <h3 class="font-serif text-sm font-bold text-slate-900">Tagihan Denda Keterlambatan</h3>
+                            <h3 class="font-serif text-sm font-bold text-slate-900">
+                                {{ $loan->fine ? 'Tagihan Denda Keterlambatan' : 'Estimasi Denda Keterlambatan Saat Ini' }}
+                            </h3>
                             <p class="text-xs text-slate-600 font-mono">
-                                Terlambat {{ $loan->fine->overdue_days }} hari &times; Rp {{ number_format($loan->fine->fine_per_day, 0, ',', '.') }}/hari
+                                Terlambat {{ $effectiveDays }} hari &times; Rp {{ number_format($fineRate, 0, ',', '.') }}/hari
                             </p>
                         </div>
-                        <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold {{ $loan->fine->isPaid() ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800' }}">
-                            {{ $loan->fine->status->label() }}
+                        <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold {{ $isFineSettled ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800' }}">
+                            {{ $isFineSettled ? $loan->fine->status->label() : ($loan->fine && ! $loan->fine->isPaid() ? $loan->fine->status->label() : 'Belum Ditagihkan Final') }}
                         </span>
                     </div>
-                    <div class="font-mono text-sm font-bold text-slate-900">
-                        Total Denda: {{ $loan->fine->formattedAmount() }}
-                        @if ($loan->fine->paid_at)
-                            <span class="text-xs font-sans font-normal text-emerald-700 ml-2">(Lunas pada {{ $loan->fine->paid_at->format('d M Y H:i') }})</span>
+                    <div class="font-mono text-sm font-bold text-slate-900 space-y-1">
+                        <div>
+                            Total Denda Kumulatif: Rp {{ number_format($effectiveTotal, 0, ',', '.') }}
+                            @if ($isFineSettled && $loan->fine?->paid_at)
+                                <span class="text-xs font-sans font-normal text-emerald-700 ml-2">(Lunas pada {{ $loan->fine->paid_at->format('d M Y H:i') }})</span>
+                            @endif
+                        </div>
+                        @if ($paidSoFar > 0 && $effectiveRemaining > 0)
+                            <div class="text-xs font-normal text-slate-700">
+                                Sudah Dibayar: <span class="font-semibold text-emerald-700">Rp {{ number_format($paidSoFar, 0, ',', '.') }}</span>
+                                &bull; Sisa Tagihan: <span class="font-bold text-rose-700">Rp {{ number_format($effectiveRemaining, 0, ',', '.') }}</span>
+                            </div>
                         @endif
                     </div>
                 </div>

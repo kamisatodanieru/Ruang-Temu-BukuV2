@@ -8,6 +8,7 @@ use App\Services\MidtransService;
 use Exception;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
@@ -24,6 +25,8 @@ class PaymentController extends Controller
      */
     public function payFine(Request $request, Fine $fine): JsonResponse
     {
+        Gate::authorize('pay', $fine);
+
         try {
             $payment = $this->finePaymentService->initiatePayment(
                 fine: $fine,

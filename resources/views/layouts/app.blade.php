@@ -473,8 +473,8 @@
                         Layanan
                     </div>
                     @php
-                        $isLoanReq = request()->routeIs('staff.loans.*') && request('status') !== 'borrowed';
-                        $isLoanRet = request()->routeIs('staff.loans.*') && request('status') === 'borrowed';
+                        $isLoanRet = request()->routeIs('staff.loans.*') && in_array(request('status'), ['returns', 'return_pending'], true);
+                        $isLoanReq = request()->routeIs('staff.loans.*') && ! $isLoanRet;
                     @endphp
                     <a href="{{ route('staff.loans.index') }}"
                        class="group relative flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 {{ $isLoanReq ? 'bg-white/[0.11] text-white shadow-sm' : 'text-stone-300/90 hover:bg-white/[0.06] hover:text-white' }}">
@@ -486,7 +486,7 @@
                         </svg>
                         <span>Peminjaman</span>
                     </a>
-                    <a href="{{ route('staff.loans.index', ['status' => 'borrowed']) }}"
+                    <a href="{{ route('staff.loans.index', ['status' => 'returns']) }}"
                        class="group relative flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 {{ $isLoanRet ? 'bg-white/[0.11] text-white shadow-sm' : 'text-stone-300/90 hover:bg-white/[0.06] hover:text-white' }}">
                         @if ($isLoanRet)
                             <span class="absolute left-0 top-2 bottom-2 w-1 rounded-r-full bg-amber-400"></span>

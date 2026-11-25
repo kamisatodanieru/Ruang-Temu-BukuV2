@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\FineStatus;
 use App\Enums\LoanStatus;
 use Database\Factories\LoanFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -65,7 +66,7 @@ class Loan extends Model
     }
 
     /**
-     * Transaksi dianggap overdue jika status = borrowed, returned_at IS NULL, dan due_at < waktu sekarang.
+     * Transaksi dianggap overdue jika status = borrowed/return_pending, returned_at IS NULL, dan due_at < waktu sekarang.
      */
     public function isOverdue(): bool
     {
@@ -84,15 +85,45 @@ class Loan extends Model
         return (int) max(1, ceil($this->due_at->diffInHours(now()) / 24));
     }
 
-    public function estimatedFineAmount(): int
+    public function effectiveOverdueDays(): int
     {
-        $days = $this->overdueDays();
-        $calculated = $days > 0 ? $days * (int) config('library.fine_per_day', 1000) : 0;
+        $fine = $this->relationLoaded('fine') ? $this->fine : null;
+        $storedDays = (int) ($fine?->overdue_days ?? 0);
 
-        if ($this->fine !== null) {
-            return max($this->fine->total_amount, $calculated);
+        if ($this->isOverdue()) {
+            return max($storedDays, $this->overdueDays());
         }
 
-        return $calculated;
+        return $storedDays;
+    }
+
+    public function effectiveFineTotal(): int
+    {
+        $fine = $this->relationLoaded('fine') ? $this->fine : null;
+        $finePerDay = (int) ($fine?->fine_per_day ?: config('library.fine_per_day', 1000));
+        $calculated = $this->isOverdue() ? ($this->overdueDays() * $finePerDay) : 0;
+
+        return max((int) ($fine?->total_amount ?? 0), $calculated);
+    }
+
+    public function effectiveRemainingFine(): int
+    {
+        $fine = $this->relationLoaded('fine') ? $this->fine : null;
+
+        if ($fine !== null && $fine->status === FineStatus::Waived) {
+            return 0;
+        }
+
+        $paidAmount = (int) ($fine?->paid_amount ?? 0);
+        if ($fine !== null && $fine->status === FineStatus::Paid && $paidAmount === 0) {
+            $paidAmount = (int) $fine->total_amount;
+        }
+
+        return max(0, $this->effectiveFineTotal() - $paidAmount);
+    }
+
+    public function estimatedFineAmount(): int
+    {
+        return $this->effectiveFineTotal();
     }
 }

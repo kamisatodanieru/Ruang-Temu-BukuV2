@@ -92,9 +92,15 @@
                         </div>
 
                         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-3 border-t border-slate-200/70">
-                            <div>
-                                <p class="text-xs text-slate-500">Total Denda</p>
+                            <div class="space-y-1">
+                                <p class="text-xs text-slate-500">Total Denda Kumulatif</p>
                                 <p class="font-mono text-lg font-bold text-slate-900">{{ $loan->fine->formattedAmount() }}</p>
+                                @if ($loan->fine->paid_amount > 0 && ! $loan->fine->isPaid())
+                                    <p class="text-xs text-slate-700 font-mono">
+                                        Terbayar: <span class="font-semibold text-emerald-700">{{ $loan->fine->formattedPaidAmount() }}</span>
+                                        &bull; Sisa Tagihan: <span class="font-bold text-rose-700">{{ $loan->fine->formattedRemainingAmount() }}</span>
+                                    </p>
+                                @endif
                                 @if ($loan->fine->paid_at)
                                     <p class="text-xs text-emerald-700 mt-0.5 font-mono">Dibayar pada {{ $loan->fine->paid_at->format('d M Y H:i') }}</p>
                                 @endif
@@ -105,7 +111,7 @@
                                         id="pay-fine-button"
                                         data-pay-url="{{ route('member.fines.pay', $loan->fine) }}"
                                         class="px-5 py-2.5 rounded-xl text-sm font-semibold bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm transition">
-                                    Bayar Denda
+                                    {{ $loan->fine->paid_amount > 0 ? 'Bayar Sisa Denda ('.$loan->fine->formattedRemainingAmount().')' : 'Bayar Denda' }}
                                 </button>
                             @endif
                         </div>

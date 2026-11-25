@@ -6,6 +6,7 @@ use App\Enums\LoanStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Loan\RejectLoanRequest;
 use App\Models\Loan;
+use App\Services\FinePaymentService;
 use App\Services\LoanService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -19,7 +20,12 @@ class LoanController extends Controller
         Gate::authorize('viewAny', Loan::class);
 
         $search = trim((string) $request->query('search', ''));
-        $statusFilter = (string) $request->query('status', '');
+        $rawStatus = (string) $request->query('status', '');
+        $allowedStatuses = array_merge(
+            array_map(static fn (LoanStatus $case): string => $case->value, LoanStatus::cases()),
+            ['overdue', 'returns']
+        );
+        $statusFilter = in_array($rawStatus, $allowedStatuses, true) ? $rawStatus : '';
 
         $loans = Loan::query()
             ->select([
@@ -30,6 +36,7 @@ class LoanController extends Controller
                 'requested_at',
                 'borrowed_at',
                 'due_at',
+                'return_requested_at',
                 'returned_at',
                 'status',
                 'rejection_reason',
@@ -38,6 +45,7 @@ class LoanController extends Controller
                 'member:id,name,email,status',
                 'book:id,title,author,isbn,available_stock',
                 'approver:id,name',
+                'fine:id,loan_id,overdue_days,fine_per_day,total_amount,paid_amount,status',
             ])
             ->when($search !== '', function ($query) use ($search) {
                 $escaped = addcslashes($search, '%_\\');
@@ -54,12 +62,17 @@ class LoanController extends Controller
                     });
                 });
             })
+            ->when($statusFilter === 'returns', function ($query) {
+                $query->whereIn('status', [LoanStatus::ReturnPending->value, LoanStatus::Borrowed->value])
+                    ->whereNull('returned_at')
+                    ->orderByRaw('CASE WHEN status = ? THEN 0 ELSE 1 END', [LoanStatus::ReturnPending->value]);
+            })
             ->when($statusFilter === 'overdue', function ($query) {
                 $query->whereIn('status', [LoanStatus::Borrowed->value, LoanStatus::ReturnPending->value])
                     ->whereNull('returned_at')
                     ->where('due_at', '<', now());
             })
-            ->when($statusFilter !== '' && $statusFilter !== 'overdue', function ($query) use ($statusFilter) {
+            ->when(! in_array($statusFilter, ['', 'overdue', 'returns'], true), function ($query) use ($statusFilter) {
                 $query->where('status', $statusFilter);
             })
             ->latest('id')
@@ -83,9 +96,15 @@ class LoanController extends Controller
         ]);
     }
 
-    public function show(Loan $loan): View
+    public function show(Loan $loan, FinePaymentService $finePaymentService): View
     {
         Gate::authorize('view', $loan);
+
+        $loan->loadMissing('fine');
+        if ($loan->fine !== null) {
+            $finePaymentService->syncPaymentStatusFromMidtrans($loan->fine);
+            $loan->unsetRelation('fine');
+        }
 
         $loan->load([
             'member:id,name,email,status',

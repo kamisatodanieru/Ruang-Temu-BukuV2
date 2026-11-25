@@ -10,16 +10,29 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Fine extends Model
 {
+    /**
+     * Nilai bawaan model untuk menjamin konsistensi state awal sebelum disimpan.
+     *
+     * @var array<string, mixed>
+     */
+    protected $attributes = [
+        'paid_amount' => 0,
+        'status' => 'unpaid',
+    ];
+
+    /**
+     * Atribut yang diizinkan untuk mass assignment saat pembuatan awal.
+     * status, paid_amount, paid_at, waived_by, dan waived_reason dikecualikan
+     * agar perubahan status finansial hanya terjadi secara eksplisit di service.
+     *
+     * @var list<string>
+     */
     protected $fillable = [
         'loan_id',
         'member_id',
         'overdue_days',
         'fine_per_day',
         'total_amount',
-        'status',
-        'paid_at',
-        'waived_by',
-        'waived_reason',
     ];
 
     protected function casts(): array
@@ -28,6 +41,7 @@ class Fine extends Model
             'overdue_days' => 'integer',
             'fine_per_day' => 'integer',
             'total_amount' => 'integer',
+            'paid_amount' => 'integer',
             'status' => FineStatus::class,
             'paid_at' => 'datetime',
         ];
@@ -65,11 +79,43 @@ class Fine extends Model
 
     public function isPayable(): bool
     {
-        return in_array($this->status, [FineStatus::Unpaid, FineStatus::PendingPayment], true);
+        return in_array($this->status, [FineStatus::Unpaid, FineStatus::PendingPayment], true)
+            && $this->remainingAmount() > 0;
+    }
+
+    public function remainingAmount(): int
+    {
+        if ($this->isPaid()) {
+            return 0;
+        }
+
+        return max(0, (int) $this->total_amount - (int) $this->paid_amount);
+    }
+
+    public function unpaidDays(): int
+    {
+        $remaining = $this->remainingAmount();
+        if ($remaining <= 0) {
+            return 0;
+        }
+
+        $rate = max(1, (int) $this->fine_per_day);
+
+        return max(1, (int) ceil($remaining / $rate));
     }
 
     public function formattedAmount(): string
     {
-        return 'Rp '.number_format($this->total_amount, 0, ',', '.');
+        return 'Rp '.number_format((int) $this->total_amount, 0, ',', '.');
+    }
+
+    public function formattedPaidAmount(): string
+    {
+        return 'Rp '.number_format((int) $this->paid_amount, 0, ',', '.');
+    }
+
+    public function formattedRemainingAmount(): string
+    {
+        return 'Rp '.number_format($this->remainingAmount(), 0, ',', '.');
     }
 }

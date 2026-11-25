@@ -224,4 +224,46 @@ class ReturnAndDashboardTest extends TestCase
 
         $this->assertSame(LoanStatus::Pending, $loan->fresh()->status);
     }
+
+    public function test_staff_returns_filter_includes_return_pending_and_borrowed_and_shows_live_overdue_estimate(): void
+    {
+        $petugas = User::factory()->petugas()->create();
+        $member = User::factory()->anggota()->create();
+
+        $bookBorrowed = Book::factory()->create(['title' => 'Buku Masih Dipinjam']);
+        $bookReturnPending = Book::factory()->create(['title' => 'Buku Diajukan Kembali']);
+        $bookPendingApproval = Book::factory()->create(['title' => 'Buku Baru Diajukan']);
+
+        $overdueBorrowedLoan = Loan::factory()->borrowed()->create([
+            'member_id' => $member->id,
+            'book_id' => $bookBorrowed->id,
+            'borrowed_at' => now()->subDays(11),
+            'due_at' => now()->subDays(4)->addHour(),
+        ]);
+
+        Loan::factory()->borrowed()->state([
+            'status' => LoanStatus::ReturnPending,
+            'return_requested_at' => now()->subMinutes(15),
+        ])->create([
+            'member_id' => $member->id,
+            'book_id' => $bookReturnPending->id,
+        ]);
+
+        Loan::factory()->create([
+            'member_id' => $member->id,
+            'book_id' => $bookPendingApproval->id,
+        ]);
+
+        // Filter menu Pengembalian (?status=returns) menampilkan ReturnPending (urutan atas) sekaligus Borrowed, tanpa Pending
+        $resReturns = $this->actingAs($petugas)->get(route('staff.loans.index', ['status' => 'returns']));
+        $resReturns->assertOk();
+        $resReturns->assertSeeInOrder(['Buku Diajukan Kembali', 'Buku Masih Dipinjam']);
+        $resReturns->assertDontSee('Buku Baru Diajukan');
+
+        // Halaman detail staf langsung menampilkan estimasi denda 4 hari (Rp 4.000) walau anggota belum membuka halaman detail
+        $resShow = $this->actingAs($petugas)->get(route('staff.loans.show', $overdueBorrowedLoan));
+        $resShow->assertOk();
+        $resShow->assertSee('Estimasi Denda Keterlambatan Saat Ini');
+        $resShow->assertSee('Rp 4.000');
+    }
 }

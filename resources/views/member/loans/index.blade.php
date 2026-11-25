@@ -124,9 +124,15 @@
                                         </span>
                                     @endif
 
-                                    @if ($loan->fine)
-                                        <div class="mt-1 font-mono text-xs font-semibold {{ $loan->fine->isPaid() ? 'text-emerald-600' : 'text-rose-600' }}">
-                                            Denda: {{ $loan->fine->formattedAmount() }} &bull; {{ $loan->fine->status->label() }}
+                                    @if ($loan->fine || $loan->isOverdue())
+                                        @php
+                                            $remainingFine = $loan->effectiveRemainingFine();
+                                            $totalFine = $loan->effectiveFineTotal();
+                                            $isFineSettled = $remainingFine === 0 && $loan->fine?->isPaid();
+                                        @endphp
+                                        <div class="mt-1 font-mono text-xs font-semibold {{ $isFineSettled ? 'text-emerald-600' : 'text-rose-600' }}">
+                                            Denda: Rp {{ number_format($isFineSettled ? $totalFine : $remainingFine, 0, ',', '.') }}
+                                            &bull; {{ $isFineSettled ? $loan->fine->status->label() : ($loan->fine && ! $loan->fine->isPaid() ? $loan->fine->status->label() : 'Belum Dibayar') }}
                                         </div>
                                     @endif
                                 </td>

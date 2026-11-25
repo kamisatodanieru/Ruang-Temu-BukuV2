@@ -19,7 +19,12 @@ class LoanController extends Controller
     public function index(Request $request): View
     {
         $member = $request->user();
-        $statusFilter = (string) $request->query('status', '');
+        $rawStatus = (string) $request->query('status', '');
+        $allowedStatuses = array_merge(
+            array_map(static fn (LoanStatus $case): string => $case->value, LoanStatus::cases()),
+            ['overdue']
+        );
+        $statusFilter = in_array($rawStatus, $allowedStatuses, true) ? $rawStatus : '';
 
         $loans = Loan::query()
             ->select([
@@ -29,6 +34,7 @@ class LoanController extends Controller
                 'requested_at',
                 'borrowed_at',
                 'due_at',
+                'return_requested_at',
                 'returned_at',
                 'rejected_at',
                 'cancelled_at',
@@ -36,7 +42,11 @@ class LoanController extends Controller
                 'rejection_reason',
             ])
             ->where('member_id', $member->id)
-            ->with(['book:id,category_id,title,author,cover_path', 'book.category:id,name', 'fine:id,loan_id,total_amount,status'])
+            ->with([
+                'book:id,category_id,title,author,cover_path',
+                'book.category:id,name',
+                'fine:id,loan_id,overdue_days,fine_per_day,total_amount,paid_amount,status',
+            ])
             ->when($statusFilter === 'overdue', function ($query) {
                 $query->whereIn('status', [LoanStatus::Borrowed->value, LoanStatus::ReturnPending->value])
                     ->whereNull('returned_at')
@@ -67,14 +77,9 @@ class LoanController extends Controller
     {
         Gate::authorize('view', $loan);
 
-        $loan->loadMissing('fine.latestPayment');
-
-        if ($loan->fine) {
-            $finePaymentService->syncPaymentStatusFromMidtrans($loan->fine);
-            $loan->unsetRelation('fine');
-        }
-
+        // Sinkronisasi Midtrans (di luar DB lock) + rekonsiliasi denda kumulatif terpusat
         $finePaymentService->ensureFineForLoan($loan);
+        $loan->unsetRelation('fine');
 
         $loan->load([
             'book:id,category_id,title,author,publisher,isbn,cover_path',

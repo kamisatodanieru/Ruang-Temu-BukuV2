@@ -267,8 +267,8 @@ class MidtransPaymentTest extends TestCase
 
         $this->partialMock(MidtransService::class, function (MockInterface $mock) {
             $mock->shouldReceive('createSnapToken')
-                ->once()
-                ->andReturn('dummy-snap-token-initial');
+                ->twice()
+                ->andReturn('dummy-snap-token-initial', 'dummy-snap-token-residual');
         });
 
         $payRes = $this->actingAs($member)->postJson(route('member.fines.pay', $fine));
@@ -296,15 +296,49 @@ class MidtransPaymentTest extends TestCase
 
         $fine->refresh();
         $this->assertSame(FineStatus::Unpaid, $fine->status);
-        $this->assertSame(2, $fine->overdue_days);
-        $this->assertSame(2000, $fine->total_amount);
+        $this->assertSame(5, $fine->overdue_days);
+        $this->assertSame(5000, $fine->total_amount);
+        $this->assertSame(3000, $fine->paid_amount);
+        $this->assertSame(2000, $fine->remainingAmount());
+        $this->assertSame(2, $fine->unpaidDays());
 
         // Replay / pengiriman ulang webhook pertama (Rp 3.000) TIDAK boleh melunasi denda selisih baru (Rp 2.000)
         $this->postJson(route('midtrans.notification'), $firstWebhookPayload)->assertOk();
 
         $fine->refresh();
         $this->assertSame(FineStatus::Unpaid, $fine->status);
-        $this->assertSame(2000, $fine->total_amount);
+        $this->assertSame(5000, $fine->total_amount);
+        $this->assertSame(3000, $fine->paid_amount);
+        $this->assertSame(2000, $fine->remainingAmount());
+
+        // Pelunasan tahap kedua hanya menagih sisa Rp 2.000 dan menjaga total historis tetap Rp 5.000 (5 hari)
+        $secondPayRes = $this->actingAs($member)->postJson(route('member.fines.pay', $fine));
+        $secondPayRes->assertOk()->assertJson([
+            'snap_token' => 'dummy-snap-token-residual',
+            'gross_amount' => 2000,
+        ]);
+
+        $secondOrderId = (string) $secondPayRes->json('order_id');
+        $secondSig = hash('sha512', $secondOrderId.'200'.'2000.00'.$serverKey);
+
+        $this->postJson(route('midtrans.notification'), [
+            'order_id' => $secondOrderId,
+            'status_code' => '200',
+            'gross_amount' => '2000.00',
+            'signature_key' => $secondSig,
+            'transaction_status' => 'settlement',
+            'fraud_status' => 'accept',
+            'payment_type' => 'qris',
+            'transaction_id' => 'MID-TRX-SECOND',
+        ])->assertOk();
+
+        $fine->refresh();
+        $this->assertSame(FineStatus::Paid, $fine->status);
+        $this->assertSame(5, $fine->overdue_days);
+        $this->assertSame(5000, $fine->total_amount);
+        $this->assertSame(5000, $fine->paid_amount);
+        $this->assertSame(0, $fine->remainingAmount());
+        $this->assertNotNull($fine->paid_at);
     }
 
     public function test_loan_show_syncs_pending_midtrans_payment_before_day_rollover_recalculation(): void
@@ -356,10 +390,160 @@ class MidtransPaymentTest extends TestCase
         $fine->refresh();
 
         $this->assertSame(PaymentStatus::Paid, $payment->status);
-        // Karena 1 hari (Rp 1.000) sudah dibayar dari total 2 hari (Rp 2.000), sisa tagihan hanya 1 hari (Rp 1.000)
-        $this->assertSame(1, $fine->overdue_days);
-        $this->assertSame(1000, $fine->total_amount);
+        // Total kumulatif tercatat penuh 2 hari (Rp 2.000), terbayar Rp 1.000, dan sisa tagihan Rp 1.000 (1 hari)
+        $this->assertSame(2, $fine->overdue_days);
+        $this->assertSame(2000, $fine->total_amount);
+        $this->assertSame(1000, $fine->paid_amount);
+        $this->assertSame(1000, $fine->remainingAmount());
+        $this->assertSame(1, $fine->unpaidDays());
         $this->assertSame(FineStatus::Unpaid, $fine->status);
+    }
+
+    public function test_return_loan_syncs_settled_pending_payment_and_cancels_stale_unpaid_midtrans_order(): void
+    {
+        $petugas = User::factory()->petugas()->create();
+        $member = User::factory()->anggota()->create();
+        $book = Book::factory()->create(['total_stock' => 3, 'available_stock' => 2]);
+
+        // Kasus A: Order pending sudah settlement di Midtrans sesaat sebelum petugas klik Konfirmasi Kembali di hari ke-2
+        $loanSettled = Loan::factory()->borrowed()->create([
+            'member_id' => $member->id,
+            'book_id' => $book->id,
+            'borrowed_at' => now()->subDays(9),
+            'due_at' => now()->subDays(2)->addHour(),
+        ]);
+
+        $fineSettled = Fine::query()->create([
+            'loan_id' => $loanSettled->id,
+            'member_id' => $member->id,
+            'overdue_days' => 1,
+            'fine_per_day' => 1000,
+            'total_amount' => 1000,
+        ]);
+        $fineSettled->status = FineStatus::PendingPayment;
+        $fineSettled->save();
+
+        Payment::query()->create([
+            'order_id' => 'FINE-RET-SETTLED-01',
+            'fine_id' => $fineSettled->id,
+            'user_id' => $member->id,
+            'gross_amount' => 1000,
+            'snap_token' => 'snap-ret-settled',
+        ]);
+
+        // Kasus B: Order pending lama (Rp 1.000) belum dibayar ketika buku dikembalikan pada hari ke-3 (Rp 3.000) -> wajib dibatalkan ke Midtrans
+        $loanStale = Loan::factory()->borrowed()->create([
+            'member_id' => $member->id,
+            'book_id' => $book->id,
+            'borrowed_at' => now()->subDays(10),
+            'due_at' => now()->subDays(3)->addHour(),
+        ]);
+
+        $fineStale = Fine::query()->create([
+            'loan_id' => $loanStale->id,
+            'member_id' => $member->id,
+            'overdue_days' => 1,
+            'fine_per_day' => 1000,
+            'total_amount' => 1000,
+        ]);
+        $fineStale->status = FineStatus::PendingPayment;
+        $fineStale->save();
+
+        $stalePayment = Payment::query()->create([
+            'order_id' => 'FINE-RET-STALE-02',
+            'fine_id' => $fineStale->id,
+            'user_id' => $member->id,
+            'gross_amount' => 1000,
+            'snap_token' => 'snap-ret-stale',
+        ]);
+
+        $this->partialMock(MidtransService::class, function (MockInterface $mock) {
+            $mock->shouldReceive('getTransactionStatus')
+                ->once()
+                ->with('FINE-RET-SETTLED-01')
+                ->andReturn((object) [
+                    'order_id' => 'FINE-RET-SETTLED-01',
+                    'transaction_status' => 'settlement',
+                    'fraud_status' => 'accept',
+                    'gross_amount' => '1000.00',
+                    'payment_type' => 'qris',
+                    'transaction_id' => 'MID-RET-01',
+                ]);
+
+            $mock->shouldReceive('getTransactionStatus')
+                ->once()
+                ->with('FINE-RET-STALE-02')
+                ->andReturn((object) [
+                    'order_id' => 'FINE-RET-STALE-02',
+                    'transaction_status' => 'pending',
+                    'gross_amount' => '1000.00',
+                    'payment_type' => 'bank_transfer',
+                    'transaction_id' => 'MID-RET-02',
+                ]);
+
+            $mock->shouldReceive('cancelTransaction')
+                ->once()
+                ->with('FINE-RET-STALE-02')
+                ->andReturn((object) ['status_code' => '200']);
+        });
+
+        $this->actingAs($petugas)->patch(route('staff.loans.return', $loanSettled))->assertSessionHasNoErrors();
+        $this->actingAs($petugas)->patch(route('staff.loans.return', $loanStale))->assertSessionHasNoErrors();
+
+        $fineSettled->refresh();
+        $this->assertSame(2, $fineSettled->overdue_days);
+        $this->assertSame(2000, $fineSettled->total_amount);
+        $this->assertSame(1000, $fineSettled->paid_amount);
+        $this->assertSame(1000, $fineSettled->remainingAmount());
+        $this->assertSame(FineStatus::Unpaid, $fineSettled->status);
+
+        $fineStale->refresh();
+        $stalePayment->refresh();
+        $this->assertSame(3, $fineStale->overdue_days);
+        $this->assertSame(3000, $fineStale->total_amount);
+        $this->assertSame(0, $fineStale->paid_amount);
+        $this->assertSame(PaymentStatus::Cancelled, $stalePayment->status);
+    }
+
+    public function test_fine_and_payment_models_ignore_mass_assignment_of_privileged_settlement_fields(): void
+    {
+        $member = User::factory()->anggota()->create();
+        $loan = Loan::factory()->returned()->create(['member_id' => $member->id]);
+
+        $fine = Fine::query()->create([
+            'loan_id' => $loan->id,
+            'member_id' => $member->id,
+            'overdue_days' => 4,
+            'fine_per_day' => 1000,
+            'total_amount' => 4000,
+            'paid_amount' => 4000,
+            'status' => FineStatus::Paid->value,
+            'paid_at' => now(),
+            'waived_by' => $member->id,
+            'waived_reason' => 'Bypass attempt',
+        ]);
+
+        $fine->refresh();
+        $this->assertSame(FineStatus::Unpaid, $fine->status);
+        $this->assertSame(0, $fine->paid_amount);
+        $this->assertNull($fine->paid_at);
+        $this->assertNull($fine->waived_by);
+
+        $payment = Payment::query()->create([
+            'order_id' => 'FINE-GUARD-01',
+            'fine_id' => $fine->id,
+            'user_id' => $member->id,
+            'gross_amount' => 4000,
+            'snap_token' => 'snap-guard',
+            'status' => PaymentStatus::Paid->value,
+            'settled_at' => now(),
+            'transaction_id' => 'FORGED-TX',
+        ]);
+
+        $payment->refresh();
+        $this->assertSame(PaymentStatus::Pending, $payment->status);
+        $this->assertNull($payment->settled_at);
+        $this->assertNull($payment->transaction_id);
     }
 
     public function test_member_with_unpaid_fine_on_returned_loan_cannot_borrow_new_book(): void
